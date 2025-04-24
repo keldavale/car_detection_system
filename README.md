@@ -72,36 +72,183 @@ The model is configured with the following default parameters in our system:
 
 ## Software Requirements
 
-- ROS 2 (Humble or newer)
+- ROS 2 Jazzy
 - Python 3.8+
 - OpenCV
 - DepthAI
 - NumPy
 - RPi.GPIO
 
-## Installation
+## Complete Raspberry Pi Setup Guide
 
-1. Clone this repository into your ROS 2 workspace:
+### 1. Initial Raspberry Pi Setup
 ```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install system dependencies
+sudo apt install -y python3-pip python3-venv git cmake
+sudo apt install -y python3-opencv libopencv-dev
+sudo apt install -y udev
+```
+
+### 2. Set Up ROS 2 Jazzy
+```bash
+# Set locale
+sudo apt update && sudo apt install locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+
+# Add ROS 2 repository
+sudo apt install software-properties-common
+sudo add-apt-repository universe
+sudo apt update && sudo apt install curl -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+
+# Install ROS 2 Jazzy
+sudo apt update
+sudo apt install -y ros-jazzy-ros-base
+sudo apt install -y ros-dev-tools
+
+# Add ROS 2 setup to .bashrc
+echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+### 3. Install DepthAI and RPLidar Dependencies
+```bash
+# Install DepthAI and model conversion tools
+python3 -m pip install depthai
+python3 -m pip install blobconverter
+
+# Verify model availability
+python3 -c "
+import blobconverter
+try:
+    model_path = blobconverter.from_zoo(
+        name='vehicle-detection-0202',
+        shaves=6,
+        version='2021.4'
+    )
+    print(f'Successfully verified model: {model_path}')
+except Exception as e:
+    print(f'Error verifying model: {e}')
+"
+
+# Install RPLidar ROS 2 package
+sudo apt install -y ros-jazzy-rplidar-ros
+
+# Set up udev rules for devices
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | sudo tee /etc/udev/rules.d/80-movidius.rules
+echo 'KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE:="0777", SYMLINK+="rplidar"' | sudo tee /etc/udev/rules.d/rplidar.rules
+
+# Reload udev rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### 4. Hardware Setup
+
+1. **OAK-D Lite Camera**:
+   - Connect to USB 3.0 port (blue port) for best performance
+   - Verify connection:
+   ```bash
+   python3 -c "import depthai; print(depthai.Device.getAllAvailableDevices())"
+   ```
+
+2. **RPLidar A1**:
+   - Connect to any USB port
+   - Note the device name (usually `/dev/ttyUSB0` or `/dev/rplidar`)
+   - Verify connection:
+   ```bash
+   ls -l /dev/rplidar  # Should show the device if udev rules are working
+   ```
+
+3. **GPIO Connections**:
+   ```
+   Vibration Motor:
+   - GPIO 18 (Pin 12) -> Motor Positive
+   - Ground (Pin 6) -> Motor Negative
+
+   Servo Motor:
+   - GPIO 12 (Pin 32) -> Signal (Orange/Yellow)
+   - 5V (Pin 2 or 4) -> Power (Red)
+   - Ground (Pin 34) -> Ground (Brown/Black)
+   ```
+
+### 5. Create ROS 2 Workspace
+```bash
+# Create workspace
+mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
-git clone https://github.com/ykeldavale/car_detection_system.git
-```
 
-2. Install dependencies:
-```bash
-pip3 install depthai opencv-python numpy blobconverter
-sudo apt-get install ros-humble-cv-bridge
-```
+# Clone required repositories
+git clone https://github.com/yourusername/car_detection_system.git
+git clone https://github.com/Slamtec/rplidar_ros.git  # RPLidar ROS driver
 
-3. Build the package:
-```bash
+# Install Python dependencies
+cd car_detection_system
+python3 -m pip install -r requirements.txt
+
+# Install additional ROS 2 Jazzy dependencies
+sudo apt install -y ros-jazzy-cv-bridge
+
+# Build workspace
 cd ~/ros2_ws
-colcon build --packages-select car_detection_system
+colcon build --symlink-install
+source install/setup.bash
+
+# Add workspace to .bashrc
+echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
 ```
 
-4. Source the workspace:
+### 6. Testing the Setup
+
+1. **Test RPLidar**:
 ```bash
-source ~/ros2_ws/install/setup.bash
+# Terminal 1
+ros2 launch rplidar_ros rplidar.launch.py
+
+# Terminal 2 (verify data)
+ros2 topic echo /scan
+```
+
+2. **Test OAK-D Lite**:
+```bash
+# Simple test script
+python3 -c "
+import depthai as dai
+pipeline = dai.Pipeline()
+cam = pipeline.createColorCamera()
+xout = pipeline.createXLinkOut()
+xout.setStreamName('rgb')
+cam.preview.link(xout.input)
+with dai.Device(pipeline) as device:
+    q = device.getOutputQueue('rgb')
+    print('Camera working!')
+"
+```
+
+3. **Test GPIO**:
+```bash
+# Test script for GPIO
+python3 -c "
+import RPi.GPIO as GPIO
+import time
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(18, GPIO.OUT)
+GPIO.setup(12, GPIO.OUT)
+pwm = GPIO.PWM(18, 100)
+servo = GPIO.PWM(12, 50)
+pwm.start(50)
+servo.start(7.5)
+time.sleep(2)
+pwm.stop()
+servo.stop()
+GPIO.cleanup()
+print('GPIO test complete!')
+"
 ```
 
 ## Usage
@@ -190,6 +337,53 @@ The debug view includes:
 
 ## Troubleshooting
 
+### Common Issues
+
+1. **Permission Denied for USB Devices**:
+```bash
+# Add user to required groups
+sudo usermod -aG dialout $USER
+sudo usermod -aG gpio $USER
+# Log out and back in for changes to take effect
+```
+
+2. **RPLidar Not Found**:
+```bash
+# Check USB device
+ls -l /dev/ttyUSB*
+# If needed, manually specify port
+ros2 launch rplidar_ros rplidar.launch.py serial_port:=/dev/ttyUSB0
+```
+
+3. **OAK-D Lite Not Detected**:
+```bash
+# Check USB connection
+lsusb | grep 03e7
+# Replug into USB 3.0 port
+# Check udev rules are loaded
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+4. **GPIO Permission Issues**:
+```bash
+# Add user to gpio group
+sudo usermod -aG gpio $USER
+# Install GPIO library
+sudo apt install -y python3-rpi.gpio
+```
+
+5. **ROS 2 Jazzy Package Issues**:
+```bash
+# If you encounter package not found errors
+sudo apt update
+sudo apt install -y ros-jazzy-<package_name>
+
+# Common packages you might need:
+sudo apt install -y ros-jazzy-cv-bridge
+sudo apt install -y ros-jazzy-image-transport
+sudo apt install -y ros-jazzy-image-transport-plugins
+```
+
 ### Network Streaming Issues
 1. Check if the port is open:
 ```bash
@@ -206,17 +400,6 @@ ping <raspberry_pi_ip>
 sudo ufw status
 # If needed, allow port:
 sudo ufw allow 8089
-```
-
-### Display Issues
-1. For X11 forwarding, ensure xauth is installed:
-```bash
-sudo apt-get install xauth
-```
-
-2. Connect with X11 forwarding enabled:
-```bash
-ssh -X pi@<raspberry_pi_ip>
 ```
 
 ### Performance Optimization
