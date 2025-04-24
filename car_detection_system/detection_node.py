@@ -566,6 +566,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.cleanup_and_shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
