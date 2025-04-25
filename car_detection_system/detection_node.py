@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 from cv_bridge import CvBridge
 import json
-import RPi.GPIO as GPIO
+from gpiozero import PWMOutputDevice, AngularServo
 import math
 from collections import deque
 from datetime import datetime
@@ -56,15 +56,9 @@ class CarDetectionNode(Node):
         # Initialize GPIO for vibration motor and servo
         self.MOTOR_PIN = 18
         self.SERVO_PIN = 12
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.MOTOR_PIN, GPIO.OUT)
-        GPIO.setup(self.SERVO_PIN, GPIO.OUT)
-        
-        # Initialize PWM
-        self.vibration_pwm = GPIO.PWM(self.MOTOR_PIN, 100)
-        self.vibration_pwm.start(0)
-        self.servo = GPIO.PWM(self.SERVO_PIN, 50)
-        self.servo.start(7.5)
+        self.vibration_pwm = PWMOutputDevice(self.MOTOR_PIN, frequency=100)
+        self.servo = AngularServo(self.SERVO_PIN, min_angle=-90, max_angle=90)
+        self.servo.angle = 0  # Center position
         
         # Parameters
         self.declare_parameter('confidence_threshold', 0.5)
@@ -140,7 +134,7 @@ class CarDetectionNode(Node):
 
         # 4. Properties
         # RGB
-        camRgb.setPreviewSize(300, 300)
+        camRgb.setPreviewSize(512, 512)
         camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camRgb.setInterleaved(False)
         camRgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
@@ -148,27 +142,29 @@ class CarDetectionNode(Node):
 
         # Mono cameras
         left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
         right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 
         # Stereo
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DEFAULT)
         stereo.setLeftRightCheck(True)
-        stereo.setExtendedDisparity(True)
+        stereo.setExtendedDisparity(False)
         stereo.setSubpixel(True)
+        stereo.setDepthAlign(dai.CameraBoardSocket.RGB)  # Align depth to RGB frame
+        stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)  # Updated median filter setting
 
         # Neural network
         # Using blobconverter to get the model
         model_path = blobconverter.from_zoo(
             name="vehicle-detection-0202",
-            shaves=6,
+            shaves=3,
             version="2021.4"
         )
         spatialDetectionNetwork.setBlobPath(model_path)
-        spatialDetectionNetwork.setConfidenceThreshold(self.confidence_threshold)
+        spatialDetectionNetwork.setConfidenceThreshold(0.3)  # Lower threshold to catch more detections
         spatialDetectionNetwork.input.setBlocking(False)
-        spatialDetectionNetwork.setBoundingBoxScaleFactor(0.5)
+        spatialDetectionNetwork.setBoundingBoxScaleFactor(0.8)  # Increase bounding box size
         spatialDetectionNetwork.setDepthLowerThreshold(100)
         spatialDetectionNetwork.setDepthUpperThreshold(5000)
 
@@ -185,7 +181,7 @@ class CarDetectionNode(Node):
 
         # Link outputs
         spatialDetectionNetwork.out.link(xoutNN.input)
-        spatialDetectionNetwork.boundingBox.link(xoutNN.input)
+        spatialDetectionNetwork.passthrough.link(xoutRgb.input)
         camRgb.preview.link(xoutRgb.input)
         stereo.depth.link(xoutDepth.input)
 
@@ -262,18 +258,12 @@ class CarDetectionNode(Node):
         return servo_angle, safety_score
 
     def set_servo_angle(self, angle_degrees):
-        """Set servo angle between 0 and 180 degrees."""
-        if angle_degrees < 0:
-            angle_degrees = 0
-        elif angle_degrees > 180:
-            angle_degrees = 180
-        
-        duty = angle_degrees / 18.0 + 2.5
-        self.servo.ChangeDutyCycle(duty)
+        """Set servo angle in degrees"""
+        self.servo.angle = angle_degrees - 90  # Convert to -90 to 90 range
 
     def set_vibration_intensity(self, intensity):
         """Set vibration motor intensity (0-100)"""
-        self.vibration_pwm.ChangeDutyCycle(min(max(intensity, 0), 100))
+        self.vibration_pwm.value = intensity / 100.0
 
     def calculate_vibration_intensity(self, distance):
         """Calculate vibration intensity based on distance"""
@@ -311,49 +301,18 @@ class CarDetectionNode(Node):
             
             # Get detection info
             conf = detection.confidence
-            label = f"Car {conf*100:.1f}%"
             
-            if hasattr(detection, 'spatialCoordinates'):
-                distance = detection.spatialCoordinates.z/1000.0  # mm to meters
-                label += f" {distance:.1f}m"
+            # Draw bounding box with thick green lines
+            color = (0, 255, 0)  # Green
+            thickness = 4  # Thicker lines
             
-            # Draw bounding box
-            cv2.rectangle(debug_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+            # Draw the bounding box
+            cv2.rectangle(debug_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, thickness)
             
             # Draw label
+            label = f"Car {conf*100:.1f}%"
             cv2.putText(debug_frame, label, (bbox[0], bbox[1] - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-            # Draw distance line if spatial coordinates available
-            if hasattr(detection, 'spatialCoordinates'):
-                center_x = (bbox[0] + bbox[2]) // 2
-                center_y = (bbox[1] + bbox[3]) // 2
-                cv2.line(debug_frame, (center_x, center_y),
-                        (frame.shape[1]//2, frame.shape[0]),
-                        (0, 0, 255), 1)
-
-        # Add depth visualization if available
-        if depth_frame is not None:
-            depth_frame = cv2.normalize(depth_frame, None, 0, 255, cv2.NORM_MINMAX)
-            depth_frame = cv2.applyColorMap(depth_frame.astype(np.uint8), cv2.COLORMAP_JET)
-            depth_frame = cv2.resize(depth_frame, (frame.shape[1]//4, frame.shape[0]//4))
-            debug_frame[10:10+depth_frame.shape[0], 10:10+depth_frame.shape[1]] = depth_frame
-
-        # Draw LiDAR detection zone
-        height, width = frame.shape[:2]
-        center_x, center_y = width//2, height
-        radius = int(height * 0.4)  # Visualization radius
-        
-        # Draw LiDAR angle limits
-        start_angle = math.degrees(self.min_angle) + 90
-        end_angle = math.degrees(self.max_angle) + 90
-        cv2.ellipse(debug_frame, (center_x, center_y), (radius, radius),
-                   0, start_angle, end_angle, (0, 255, 255), 2)
-
-        # Draw distance thresholds
-        min_radius = int(radius * (self.min_vibration_distance / self.max_vibration_distance))
-        cv2.circle(debug_frame, (center_x, center_y), min_radius, (0, 0, 255), 2)
-        cv2.circle(debug_frame, (center_x, center_y), radius, (255, 0, 0), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
         return debug_frame
 
@@ -376,26 +335,21 @@ class CarDetectionNode(Node):
             detections = []
             if in_det is not None:
                 detections = in_det.detections
+                self.get_logger().info(f"Number of detections: {len(detections)}")
+                for i, det in enumerate(detections):
+                    self.get_logger().info(f"Detection {i}: Confidence: {det.confidence:.2f}, Label: {det.label}")
             
-            # Create debug frame if needed
-            if self.debug_mode or self.display_mode != 'none':
-                debug_frame = self.create_debug_frame(frame, detections, depth_frame)
-                
-                # Handle display based on mode
-                if self.display_mode == 'local':
-                    cv2.imshow("Car Detection View", debug_frame)
-                    key = cv2.waitKey(1)
-                    if key == ord('q'):
-                        self.cleanup_and_shutdown()
-                        return
-                
-                elif self.display_mode == 'network':
-                    # Try to accept new clients
-                    self.handle_client_connection()
-                    
-                    # Send frame if client is connected
-                    if self.client_socket:
-                        self.send_frame(debug_frame)
+            # Create debug frame
+            debug_frame = self.create_debug_frame(frame, detections, depth_frame)
+            
+            # Display the debug frame
+            cv2.imshow("Car Detection", debug_frame)
+            cv2.waitKey(1)  # Ensure the window is updated
+            
+            # Break loop on 'q' press
+            if cv2.waitKey(1) == ord('q'):
+                self.cleanup_and_shutdown()
+                return
             
             if self.prev_frame is not None:
                 if in_det is not None:
@@ -504,13 +458,12 @@ class CarDetectionNode(Node):
         if self.save_debug_video and self.video_writer is not None:
             self.video_writer.release()
         cv2.destroyAllWindows()
+        self.vibration_pwm.close()
+        self.servo.close()
         rclpy.shutdown()
 
     def __del__(self):
         self.cleanup_and_shutdown()
-        self.vibration_pwm.stop()
-        self.servo.stop()
-        GPIO.cleanup()
 
 def main(args=None):
     rclpy.init(args=args)

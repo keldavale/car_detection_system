@@ -23,9 +23,8 @@ def generate_launch_description():
         ),
         Node(
             package='car_detection_system',
-            executable='python3',
+            executable='detection_node',
             name='car_detection',
-            arguments=[os.path.join(os.getenv('COLCON_PREFIX_PATH'), 'car_detection_system', 'scripts', 'detection_node.py')],
             parameters=[{
                 'display_mode': 'local',
                 'debug_mode': True,
