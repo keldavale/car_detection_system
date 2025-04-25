@@ -25,7 +25,7 @@ class CarDetectionNode(Node):
         
         # Display parameters
         self.declare_parameter('display_mode', 'local')  # 'local', 'network', or 'none'
-        self.declare_parameter('stream_port', 8089)
+        self.declare_parameter('stream_port', 5000)
         self.declare_parameter('stream_host', '0.0.0.0')
         
         self.display_mode = self.get_parameter('display_mode').value
@@ -363,47 +363,6 @@ class CarDetectionNode(Node):
         normVals[::2] = frame.shape[1]
         return (np.clip(np.array(bbox), 0, 1) * normVals).astype(int)
 
-    def setup_network_streaming(self):
-        """Setup TCP socket for streaming video"""
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.stream_host, self.stream_port))
-            self.server_socket.listen(1)
-            self.server_socket.setblocking(False)
-            self.get_logger().info(f'Stream server started on port {self.stream_port}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to setup network streaming: {str(e)}')
-            self.display_mode = 'none'
-
-    def handle_client_connection(self):
-        """Accept new client connections"""
-        try:
-            if self.server_socket:
-                self.client_socket, addr = self.server_socket.accept()
-                self.get_logger().info(f'Client connected from {addr}')
-        except BlockingIOError:
-            pass  # No client trying to connect
-        except Exception as e:
-            self.get_logger().error(f'Client connection error: {str(e)}')
-
-    def send_frame(self, frame):
-        """Send frame over network"""
-        try:
-            if self.client_socket:
-                # Compress frame
-                encoded_frame = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])[1]
-                data = pickle.dumps(encoded_frame)
-                
-                # Send frame size followed by frame data
-                size = struct.pack('>L', len(data))
-                self.client_socket.sendall(size + data)
-        except (socket.error, BrokenPipeError):
-            self.client_socket = None
-        except Exception as e:
-            self.get_logger().error(f'Frame sending error: {str(e)}')
-            self.client_socket = None
-
     def process_camera(self):
         in_rgb = self.rgb_queue.tryGet()
         in_det = self.detection_queue.tryGet()
@@ -424,7 +383,7 @@ class CarDetectionNode(Node):
                 
                 # Handle display based on mode
                 if self.display_mode == 'local':
-                    cv2.imshow("Debug View", debug_frame)
+                    cv2.imshow("Car Detection View", debug_frame)
                     key = cv2.waitKey(1)
                     if key == ord('q'):
                         self.cleanup_and_shutdown()
@@ -544,10 +503,6 @@ class CarDetectionNode(Node):
         self.get_logger().info("Shutting down...")
         if self.save_debug_video and self.video_writer is not None:
             self.video_writer.release()
-        if self.client_socket:
-            self.client_socket.close()
-        if self.server_socket:
-            self.server_socket.close()
         cv2.destroyAllWindows()
         rclpy.shutdown()
 
